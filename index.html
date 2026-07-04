@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web OCR, Rendering & Mapping</title>
+    <!-- Tesseract.js v5 -->
+    <script src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'></script>
+    <!-- PDF.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <!-- jsPDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 20px; 
+            max-width: 1000px; 
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 15px;
+        }
+        button {
+            padding: 8px 16px;
+            cursor: pointer;
+            border: none;
+            border-radius: 5px;
+            background-color: #007bff;
+            color: white;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        button:not(:disabled):hover {
+            background-color: #0056b3;
+        }
+        
+        /* Contenedor con scroll para imágenes grandes */
+        #workspace-wrapper {
+            max-width: 100%;
+            overflow: auto;
+            border: 1px solid #ccc;
+            margin-top: 20px;
+            position: relative;
+            background-color: #f0f0f0;
+        }
+        
+        #workspace { 
+            position: relative; 
+            display: inline-block; 
+        }
+        
+        canvas { 
+            display: block; 
+        }
+        
+        .ocr-overlay { 
+            position: absolute; 
+            color: transparent; 
+            background: rgba(0, 0, 255, 0.1); 
+            pointer-events: none; 
+            border: 1px solid transparent;
+            font-size: 10px;
+            line-height: 1;
+            white-space: nowrap;
+            box-sizing: border-box;
+        }
+        .ocr-overlay:hover { 
+            background: rgba(0, 255, 0, 0.2); 
+            border: 1px solid green; 
+            color: black; 
+            pointer-events: auto;
+            z-index: 10;
+        }
+        
+        #status { 
+            margin-top: 15px; 
+            font-weight: bold; 
+            color: #333; 
+        }
+
+        /* === BARRA DE PROGRESO === */
+        .progress-container {
+            width: 100%;
+            max-width: 600px;
+            height: 22px;
+            background-color: #e9ecef;
+            border-radius: 11px;
+            margin-top: 10px;
+            overflow: hidden;
+            display: none;
+        }
+        .progress-bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #007bff, #00c6ff);
+            text-align: center;
+            line-height: 22px;
+            color: white;
+            font-size: 12px;
+            font-weight: bold;
+            transition: width 0.2s ease;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>OCR, Rendering & Mapping Web App</h2>
+    
+    <div class="controls">
+        <input type="file" id="fileInput" accept="application/pdf,image/*">
+        <button id="processBtn" disabled>Process & Apply OCR</button>
+        <button id="saveBtn" disabled>Save Enhanced PDF</button>
+    </div>
+    
+    <div id="status">Esperando archivo...</div>
+
+    <!-- Elemento de la barra de progreso -->
+    <div class="progress-container" id="progressContainer">
+        <div class="progress-bar" id="progressBar">0%</div>
+    </div>
+    
+    <div id="workspace-wrapper">
+        <div id="workspace">
+            <canvas id="renderCanvas"></canvas>
+        </div>
+    </div>
+
+    <script>
+        // Configurar trabajador de PDF.js
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        
+        const fileInput = document.getElementById('fileInput');
+        const processBtn = document.getElementById('processBtn');
+        const saveBtn = document.getElementById('saveBtn');
+        const canvas = document.getElementById('renderCanvas');
+        const ctx = canvas.getContext('2d');
+        const workspace = document.getElementById('workspace');
+        const status = document.getElementById('status');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressBar = document.getElementById('progressBar');
+
+        let currentImageData = null;
+        let mappedData = []; // Almacena texto y coordenadas
+
+        // === MANEJO DE CARGA DE ARCHIVO ===
+        fileInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            // Limpiar estado anterior
+            clearOverlays();
+            mappedData = [];
+            saveBtn.disabled = true;
+            processBtn.disabled = true;
+            status.textContent = "Cargando archivo...";
+            resetProgress();
+
+            try {
+                const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+                
+                if (isPdf) {
+                    await renderPDF(file);
+                } else if (file.type.startsWith('image/')) {
+                    await renderImage(file);
+                } else {
+                    throw new Error("Formato no soportado. Use PDF o Imagen.");
+                }
+                
+                processBtn.disabled = false;
+                status.textContent = "✅ Archivo cargado. Listo para procesar OCR.";
+            } catch (err) {
+                status.textContent = "❌ Error al cargar: " + err.message;
+                console.error(err);
+            }
+        });
+
+        // === RENDERIZADO PDF ===
+        async function renderPDF(file) {
+            const arrayBuffer = await file.arrayBuffer();
+            const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+            const page = await pdf.getPage(1);
+            const viewport = page.getViewport({ scale: 1.5 }); // Escala para mejor calidad de OCR
+            
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            
+            const renderCtx = { canvasContext: ctx, viewport: viewport };
+            await page.render(renderCtx).promise;
+            currentImageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        }
+
+        // === RENDERIZADO IMAGEN ===
+        function renderImage(file) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => {
+                    // Mejora: Liberar memoria del ObjectURL
+                    URL.revokeObjectURL(img.src);
+                    
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    ctx.drawImage(img, 0, 0);
+                    currentImageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                    resolve();
+                };
+                img.onerror = () => reject(new Error("No se pudo cargar la imagen."));
+                img.src = URL.createObjectURL(file);
+            });
+        }
+
+        // === PROCESAMIENTO OCR ===
+        processBtn.addEventListener('click', async () => {
+            if (!currentImageData) return;
+            
+            processBtn.disabled = true;
+            saveBtn.disabled = true;
+            status.textContent = "Iniciando OCR...";
+            progressContainer.style.display = 'block';
+            clearOverlays();
+
+            try {
+                // Tesseract v5 API (Carga automática de spa+eng)
+                status.textContent = "Descargando/Inicializando motor OCR (puede tardar la primera vez)...";
+                const worker = await Tesseract.createWorker('spa+eng', 1, {
+                    logger: m => {
+                        if (m.status === 'recognizing text') {
+                            updateProgress(m.progress);
+                            status.textContent = `Reconociendo texto: ${Math.round(m.progress * 100)}% completado`;
+                        } else if (m.status === 'loading tesseract core' || m.status === 'initializing tesseract') {
+                            status.textContent = "Preparando motor OCR...";
+                        }
+                    }
+                });
+
+                status.textContent = "Reconociendo texto: 0% completado";
+                const result = await worker.recognize(currentImageData);
+
+                mappedData = [];
+
+                if (result.data.words && result.data.words.length > 0) {
+                    result.data.words.forEach(word => {
+                        // Ignorar palabras vacías o sin coordenadas válidas
+                        if (!word.text || word.text.trim() === '' || !word.bbox) return;
+
+                        const { x0, y0, x1, y1 } = word.bbox;
+                        const div = document.createElement('div');
+                        div.className = 'ocr-overlay';
+                        div.style.left = `${x0}px`;
+                        div.style.top = `${y0}px`;
+                        div.style.width = `${x1 - x0}px`;
+                        div.style.height = `${y1 - y0}px`;
+                        div.innerText = word.text;
+                        workspace.appendChild(div);
+
+                        mappedData.push({
+                            text: word.text,
+                            x: x0,
+                            y: y0,
+                            w: x1 - x0,
+                            h: y1 - y0
+                        });
+                    });
+                }
+
+                await worker.terminate();
+                
+                updateProgress(1);
+                if (mappedData.length > 0) {
+                    status.textContent = `✅ OCR completado. ${mappedData.length} palabras detectadas. Listo para guardar.`;
+                    saveBtn.disabled = false;
+                } else {
+                    status.textContent = "⚠️ OCR completado, pero no se detectó texto en la imagen.";
+                }
+                
+            } catch (error) {
+                console.error(error);
+                status.textContent = "❌ Error en OCR: " + error.message;
+                resetProgress();
+            } finally {
+                processBtn.disabled = false;
+            }
+        });
+
+        // === EXPORTAR A PDF CON TEXTO INVISIBLE ===
+        saveBtn.addEventListener('click', () => {
+            if (mappedData.length === 0) return;
+            
+            saveBtn.disabled = true;
+            status.textContent = "Generando PDF...";
+
+            try {
+                const { jsPDF } = window.jspdf;
+                const imgWidth = canvas.width;
+                const imgHeight = canvas.height;
+                
+                const doc = new jsPDF({
+                    orientation: imgWidth > imgHeight ? 'landscape' : 'portrait',
+                    unit: 'px', // Usar píxeles para coincidir con el canvas
+                    format: [imgWidth, imgHeight],
+                    hotfixes: ['px_scaling'] // Fix para manejar escalado en px
+                });
+
+                // 1. Añadir la imagen base
+                const imgData = canvas.toDataURL('image/jpeg', 0.92);
+                doc.addImage(imgData, 'JPEG', 0, 0, imgWidth, imgHeight);
+
+                // 2. Añadir la capa de texto invisible
+                doc.setTextColor(0, 0, 0, 0); // Texto 100% transparente
+                
+                mappedData.forEach(item => {
+                    // Calcular el tamaño de fuente dinámico basado en la altura de la palabra
+                    // En jsPDF (px), una aproximación es restar unos pixels al tamaño de la caja
+                    const fontSize = item.h * 0.85; 
+                    doc.setFontSize(fontSize);
+                    
+                    // Ajustar la posición Y para que coincida con la línea base de la letra
+                    const yPos = item.y + (item.h * 0.85);
+                    
+                    // maxWidth asegura que el texto haga wrap exactamente dentro de su caja
+                    doc.text(item.text, item.x, yPos, { 
+                        maxWidth: item.w,
+                        baseline: 'alphabetic'
+                    });
+                });
+
+                doc.save('documento_con_ocr.pdf');
+                status.textContent = "💾 Archivo PDF con texto seleccionable guardado correctamente.";
+            } catch (err) {
+                console.error(err);
+                status.textContent = "❌ Error al guardar el PDF: " + err.message;
+            } finally {
+                saveBtn.disabled = false;
+            }
+        });
+
+        // === FUNCIONES UTILITARIAS ===
+        function clearOverlays() {
+            document.querySelectorAll('.ocr-overlay').forEach(el => el.remove());
+        }
+
+        function updateProgress(porcentaje) {
+            const pct = Math.round(porcentaje * 100);
+            progressBar.style.width = `${pct}%`;
+            progressBar.textContent = `${pct}%`;
+        }
+
+        function resetProgress() {
+            progressContainer.style.display = 'none';
+            progressBar.style.width = '0%';
+            progressBar.textContent = '0%';
+        }
+    </script>
+</body>
+</html>
