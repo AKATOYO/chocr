@@ -41,7 +41,6 @@
             background-color: #0056b3;
         }
         
-        /* Contenedor con scroll para imágenes grandes */
         #workspace-wrapper {
             max-width: 100%;
             overflow: auto;
@@ -85,7 +84,6 @@
             color: #333; 
         }
 
-        /* === BARRA DE PROGRESO === */
         .progress-container {
             width: 100%;
             max-width: 600px;
@@ -121,7 +119,6 @@
     
     <div id="status">Esperando archivo...</div>
 
-    <!-- Elemento de la barra de progreso -->
     <div class="progress-container" id="progressContainer">
         <div class="progress-bar" id="progressBar">0%</div>
     </div>
@@ -147,14 +144,12 @@
         const progressBar = document.getElementById('progressBar');
 
         let currentImageData = null;
-        let mappedData = []; // Almacena texto y coordenadas
+        let mappedData = []; 
 
-        // === MANEJO DE CARGA DE ARCHIVO ===
         fileInput.addEventListener('change', async (e) => {
             const file = e.target.files[0];
             if (!file) return;
             
-            // Limpiar estado anterior
             clearOverlays();
             mappedData = [];
             saveBtn.disabled = true;
@@ -181,12 +176,11 @@
             }
         });
 
-        // === RENDERIZADO PDF ===
         async function renderPDF(file) {
             const arrayBuffer = await file.arrayBuffer();
             const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
             const page = await pdf.getPage(1);
-            const viewport = page.getViewport({ scale: 1.5 }); // Escala para mejor calidad de OCR
+            const viewport = page.getViewport({ scale: 1.5 }); 
             
             canvas.width = viewport.width;
             canvas.height = viewport.height;
@@ -196,14 +190,11 @@
             currentImageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         }
 
-        // === RENDERIZADO IMAGEN ===
         function renderImage(file) {
             return new Promise((resolve, reject) => {
                 const img = new Image();
                 img.onload = () => {
-                    // Mejora: Liberar memoria del ObjectURL
                     URL.revokeObjectURL(img.src);
-                    
                     canvas.width = img.width;
                     canvas.height = img.height;
                     ctx.drawImage(img, 0, 0);
@@ -215,7 +206,6 @@
             });
         }
 
-        // === PROCESAMIENTO OCR ===
         processBtn.addEventListener('click', async () => {
             if (!currentImageData) return;
             
@@ -226,15 +216,22 @@
             clearOverlays();
 
             try {
-                // Tesseract v5 API (Carga automática de spa+eng)
-                status.textContent = "Descargando/Inicializando motor OCR (puede tardar la primera vez)...";
+                status.textContent = "Descargando motor OCR (puede tardar la primera vez)...";
+                
+                // CONFIGURACIÓN EXPLÍCITA PARA EVITAR ERRORES undefined EN GITHUB PAGES
                 const worker = await Tesseract.createWorker('spa+eng', 1, {
+                    workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js',
+                    corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5',
+                    langPath: 'https://tessdata.projectnaptha.com/4.0.0',
                     logger: m => {
                         if (m.status === 'recognizing text') {
                             updateProgress(m.progress);
                             status.textContent = `Reconociendo texto: ${Math.round(m.progress * 100)}% completado`;
-                        } else if (m.status === 'loading tesseract core' || m.status === 'initializing tesseract') {
-                            status.textContent = "Preparando motor OCR...";
+                        } else if (m.status === 'loading language traineddata') {
+                            status.textContent = "Cargando diccionario de idiomas...";
+                            updateProgress(m.progress);
+                        } else {
+                            status.textContent = "Preparando motor: " + m.status;
                         }
                     }
                 });
@@ -246,7 +243,6 @@
 
                 if (result.data.words && result.data.words.length > 0) {
                     result.data.words.forEach(word => {
-                        // Ignorar palabras vacías o sin coordenadas válidas
                         if (!word.text || word.text.trim() === '' || !word.bbox) return;
 
                         const { x0, y0, x1, y1 } = word.bbox;
@@ -280,15 +276,16 @@
                 }
                 
             } catch (error) {
-                console.error(error);
-                status.textContent = "❌ Error en OCR: " + error.message;
+                console.error("Error detallado de Tesseract:", error);
+                // Mensaje de error más descriptivo
+                let errMsg = error.message || JSON.stringify(error);
+                status.textContent = "❌ Error en OCR: " + errMsg;
                 resetProgress();
             } finally {
                 processBtn.disabled = false;
             }
         });
 
-        // === EXPORTAR A PDF CON TEXTO INVISIBLE ===
         saveBtn.addEventListener('click', () => {
             if (mappedData.length === 0) return;
             
@@ -302,28 +299,20 @@
                 
                 const doc = new jsPDF({
                     orientation: imgWidth > imgHeight ? 'landscape' : 'portrait',
-                    unit: 'px', // Usar píxeles para coincidir con el canvas
+                    unit: 'px', 
                     format: [imgWidth, imgHeight],
-                    hotfixes: ['px_scaling'] // Fix para manejar escalado en px
+                    hotfixes: ['px_scaling'] 
                 });
 
-                // 1. Añadir la imagen base
                 const imgData = canvas.toDataURL('image/jpeg', 0.92);
                 doc.addImage(imgData, 'JPEG', 0, 0, imgWidth, imgHeight);
 
-                // 2. Añadir la capa de texto invisible
-                doc.setTextColor(0, 0, 0, 0); // Texto 100% transparente
+                doc.setTextColor(0, 0, 0, 0); 
                 
                 mappedData.forEach(item => {
-                    // Calcular el tamaño de fuente dinámico basado en la altura de la palabra
-                    // En jsPDF (px), una aproximación es restar unos pixels al tamaño de la caja
                     const fontSize = item.h * 0.85; 
                     doc.setFontSize(fontSize);
-                    
-                    // Ajustar la posición Y para que coincida con la línea base de la letra
                     const yPos = item.y + (item.h * 0.85);
-                    
-                    // maxWidth asegura que el texto haga wrap exactamente dentro de su caja
                     doc.text(item.text, item.x, yPos, { 
                         maxWidth: item.w,
                         baseline: 'alphabetic'
@@ -340,7 +329,6 @@
             }
         });
 
-        // === FUNCIONES UTILITARIAS ===
         function clearOverlays() {
             document.querySelectorAll('.ocr-overlay').forEach(el => el.remove());
         }
